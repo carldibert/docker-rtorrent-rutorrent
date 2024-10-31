@@ -38,10 +38,13 @@ FROM src AS src-curl
 ARG CURL_VERSION
 RUN curl -sSL "https://curl.se/download/curl-${CURL_VERSION}.tar.gz" | tar xz --strip 1
 
+FROM src AS src-libtorrent
+RUN wget "https://github.com/rakshasa/rtorrent/releases/download/v0.10.0/libtorrent-0.14.0.tar.gz"
+RUN tar -xvzf libtorrent-0.14.0.tar.gz
+
 FROM src AS src-rtorrent
-RUN git init . && git remote add origin "https://github.com/stickz/rtorrent.git"
-ARG RTORRENT_STICKZ_VERSION
-RUN git fetch origin "${RTORRENT_STICKZ_VERSION}" && git checkout -q FETCH_HEAD
+RUN wget "https://github.com/rakshasa/rtorrent/releases/download/v0.10.0/rtorrent-0.10.0.tar.gz"
+RUN tar -xvzf rtorrent-0.10.0.tar.gz
 
 FROM src AS src-mktorrent
 RUN git init . && git remote add origin "https://github.com/pobrn/mktorrent.git"
@@ -130,10 +133,10 @@ RUN make DESTDIR=${DIST_PATH} install -j$(nproc)
 RUN tree ${DIST_PATH}
 
 WORKDIR /usr/local/src/rtorrent
-COPY --from=src-rtorrent /src .
+COPY --from=src-libtorrent /src/rtorrent/libtorrent .
+COPY --from=src-rtorrent /src/rtorrent/rtorrent .
 
 WORKDIR /usr/local/src/rtorrent/libtorrent
-RUN ./autogen.sh
 RUN ./configure --enable-aligned --disable-instrumentation --enable-udns
 RUN make -j$(nproc) CXXFLAGS="-w -O3 -flto -Werror=odr -Werror=lto-type-mismatch -Werror=strict-aliasing"
 RUN make install -j$(nproc)
@@ -141,7 +144,6 @@ RUN make DESTDIR=${DIST_PATH} install -j$(nproc)
 RUN tree ${DIST_PATH}
 
 WORKDIR /usr/local/src/rtorrent/rtorrent
-RUN ./autogen.sh
 RUN ./configure --with-xmlrpc-c --with-ncurses
 RUN make -j$(nproc) CXXFLAGS="-w -O3 -flto -Werror=odr -Werror=lto-type-mismatch -Werror=strict-aliasing"
 RUN make install -j$(nproc)
