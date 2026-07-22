@@ -15,9 +15,6 @@ ARG DUMPTORRENT_VERSION=v1.7.0
 ARG ALPINE_VERSION=3.23
 ARG ALPINE_S6_VERSION=${ALPINE_VERSION}-2.2.0.3
 
-# Tuned for the deployment host: AMD EPYC 7702P (Zen 2)
-ARG TARGET_ARCH_FLAGS="-march=znver2 -mtune=znver2"
-
 FROM tianon/gosu:latest AS gosu
 
 FROM --platform=${BUILDPLATFORM} alpine:${ALPINE_VERSION} AS src
@@ -114,12 +111,22 @@ RUN apk --update --no-cache add \
     xz \
     zlib-dev
 
-ARG TARGET_ARCH_FLAGS
+ARG TARGETARCH
 ENV DIST_PATH="/dist"
+
+# Zen2-specific tuning only applies to the amd64 leg (Tower's actual deployment
+# target, an EPYC 7702P) — -march=znver2 doesn't exist on ARM compilers at all,
+# so it must not be baked in unconditionally for the arm/v6, arm/v7, arm64 legs
+# of this multi-arch build.
+RUN if [ "$TARGETARCH" = "amd64" ]; then \
+      echo 'TARGET_ARCH_FLAGS="-march=znver2 -mtune=znver2"' > /etc/target_arch_flags.sh; \
+    else \
+      echo 'TARGET_ARCH_FLAGS=""' > /etc/target_arch_flags.sh; \
+    fi
 
 WORKDIR /usr/local/src/cares
 COPY --from=src-cares /src .
-RUN cmake . -D CARES_SHARED=ON -D CMAKE_BUILD_TYPE:STRING="Release" -D CMAKE_C_FLAGS_RELEASE:STRING="-O3 ${TARGET_ARCH_FLAGS} -flto=\"$(nproc)\" -pipe"
+RUN . /etc/target_arch_flags.sh && cmake . -D CARES_SHARED=ON -D CMAKE_BUILD_TYPE:STRING="Release" -D CMAKE_C_FLAGS_RELEASE:STRING="-O3 ${TARGET_ARCH_FLAGS} -flto=\"$(nproc)\" -pipe"
 RUN cmake --build . --clean-first --parallel $(nproc)
 RUN make install -j$(nproc)
 RUN make DESTDIR=${DIST_PATH} install -j$(nproc)
@@ -127,7 +134,7 @@ RUN tree ${DIST_PATH}
 
 WORKDIR /usr/local/src/curl
 COPY --from=src-curl /src .
-RUN cmake . -D ENABLE_ARES=ON -D CURL_LTO=ON -D CURL_USE_OPENSSL=ON -D CURL_BROTLI=ON -D CURL_ZSTD=ON -D BUILD_SHARED_LIBS=ON -D CMAKE_BUILD_TYPE:STRING="Release" -D CMAKE_C_FLAGS_RELEASE:STRING="-O3 ${TARGET_ARCH_FLAGS} -flto=\"$(nproc)\" -pipe"
+RUN . /etc/target_arch_flags.sh && cmake . -D ENABLE_ARES=ON -D CURL_LTO=ON -D CURL_USE_OPENSSL=ON -D CURL_BROTLI=ON -D CURL_ZSTD=ON -D BUILD_SHARED_LIBS=ON -D CMAKE_BUILD_TYPE:STRING="Release" -D CMAKE_C_FLAGS_RELEASE:STRING="-O3 ${TARGET_ARCH_FLAGS} -flto=\"$(nproc)\" -pipe"
 RUN cmake --build . --clean-first --parallel $(nproc)
 RUN make install -j$(nproc)
 RUN make DESTDIR=${DIST_PATH} install -j$(nproc)
@@ -135,7 +142,7 @@ RUN tree ${DIST_PATH}
 
 WORKDIR /usr/local/src/xmlrpc-c
 COPY --from=src-xmlrpc-c /src .
-RUN ./configure --disable-wininet-client --disable-libwww-client --disable-cplusplus --disable-abyss-server --disable-cgi-server CC="gcc -std=gnu17 ${TARGET_ARCH_FLAGS}" CXX="g++ -std=gnu++17 ${TARGET_ARCH_FLAGS}"
+RUN . /etc/target_arch_flags.sh && ./configure --disable-wininet-client --disable-libwww-client --disable-cplusplus --disable-abyss-server --disable-cgi-server CC="gcc -std=gnu17 ${TARGET_ARCH_FLAGS}" CXX="g++ -std=gnu++17 ${TARGET_ARCH_FLAGS}"
 RUN make -j$(nproc)
 RUN make install -j$(nproc)
 RUN make DESTDIR=${DIST_PATH} install -j$(nproc)
@@ -145,7 +152,7 @@ WORKDIR /usr/local/src/libtorrent
 COPY --from=src-libtorrent /src .
 RUN autoreconf -vfi
 RUN ./configure
-RUN make -j$(nproc) CXXFLAGS="-w -O3 ${TARGET_ARCH_FLAGS} -flto -Werror=odr -Werror=lto-type-mismatch -Werror=strict-aliasing"
+RUN . /etc/target_arch_flags.sh && make -j$(nproc) CXXFLAGS="-w -O3 ${TARGET_ARCH_FLAGS} -flto -Werror=odr -Werror=lto-type-mismatch -Werror=strict-aliasing"
 RUN make install -j$(nproc)
 RUN make DESTDIR=${DIST_PATH} install -j$(nproc)
 RUN tree ${DIST_PATH}
@@ -154,15 +161,14 @@ WORKDIR /usr/local/src/rtorrent
 COPY --from=src-rtorrent /src .
 RUN autoreconf -vfi
 RUN ./configure --with-xmlrpc-c --with-ncurses
-RUN make -j$(nproc) CXXFLAGS="-w -O3 ${TARGET_ARCH_FLAGS} -flto -Werror=odr -Werror=lto-type-mismatch -Werror=strict-aliasing"
+RUN . /etc/target_arch_flags.sh && make -j$(nproc) CXXFLAGS="-w -O3 ${TARGET_ARCH_FLAGS} -flto -Werror=odr -Werror=lto-type-mismatch -Werror=strict-aliasing"
 RUN make install -j$(nproc)
 RUN make DESTDIR=${DIST_PATH} install -j$(nproc)
 RUN tree ${DIST_PATH}
 
 WORKDIR /usr/local/src/mktorrent
 COPY --from=src-mktorrent /src .
-RUN echo "CC = gcc" >> Makefile
-RUN echo "CFLAGS = -w -flto -O3 ${TARGET_ARCH_FLAGS}" >> Makefile
+RUN . /etc/target_arch_flags.sh && echo "CC = gcc" >> Makefile && echo "CFLAGS = -w -flto -O3 ${TARGET_ARCH_FLAGS}" >> Makefile
 RUN echo "USE_PTHREADS = 1" >> Makefile
 RUN echo "USE_OPENSSL = 1" >> Makefile
 RUN make -j$(nproc)
@@ -172,7 +178,7 @@ RUN tree ${DIST_PATH}
 
 WORKDIR /usr/local/src/dumptorrent
 COPY --from=src-dumptorrent /src .
-RUN cmake -B build/ -DCMAKE_CXX_COMPILER=g++ -DCMAKE_C_COMPILER=gcc -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS="${TARGET_ARCH_FLAGS}" -DCMAKE_CXX_FLAGS="${TARGET_ARCH_FLAGS}" -S .
+RUN . /etc/target_arch_flags.sh && cmake -B build/ -DCMAKE_CXX_COMPILER=g++ -DCMAKE_C_COMPILER=gcc -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS="${TARGET_ARCH_FLAGS}" -DCMAKE_CXX_FLAGS="${TARGET_ARCH_FLAGS}" -S .
 RUN cmake --build build/ --config Release --parallel $(nproc)
 RUN cp build/dumptorrent build/scrapec ${DIST_PATH}/usr/local/bin
 RUN tree ${DIST_PATH}
