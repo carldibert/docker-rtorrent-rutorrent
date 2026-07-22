@@ -33,8 +33,8 @@ jobs:
       push: ${{ github.event_name != 'pull_request' }}
       set-meta-labels: true
       meta-images: |
-        crazymax/rtorrent-rutorrent
-        ghcr.io/crazy-max/rtorrent-rutorrent
+        notcarl/rutorrent-fork
+        ghcr.io/carldibert/docker-rtorrent-rutorrent
       meta-tags: |
         type=match,pattern=(.*)-r,group=1
         type=ref,event=pr
