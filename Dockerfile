@@ -1,60 +1,56 @@
 # syntax=docker/dockerfile:1
 
-ARG LIBSIG_VERSION=3.0.3
-ARG CARES_VERSION=1.31.0
-ARG CURL_VERSION=8.5.0
-ARG XMLRPC_VERSION=01.58.00
+ARG CARES_VERSION=1.34.6
+ARG CURL_VERSION=8.20.0
+ARG XMLRPC_C_VERSION=1.60.01
+
+ARG LIBTORRENT_VERSION=v0.16.18
+ARG RTORRENT_VERSION=v0.16.18
+
 ARG MKTORRENT_VERSION=v1.1
-ARG GEOIP2_PHPEXT_VERSION=1.3.1
 
-# v4.3.6
-ARG RUTORRENT_VERSION=31c8d351002fb1bdcd71c0652aa516384d330712
-ARG GEOIP2_RUTORRENT_VERSION=4ff2bde530bb8eef13af84e4413cedea97eda148
+ARG RUTORRENT_VERSION=v5.3.9
+ARG DUMPTORRENT_VERSION=v1.7.0
 
-# v6.1-0.9.8-0.13.8
-ARG RTORRENT_STICKZ_VERSION=7e852c88465682864ef80d86f1d085d932ef3d89
-
-ARG ALPINE_VERSION=3.19
+ARG ALPINE_VERSION=3.23
 ARG ALPINE_S6_VERSION=${ALPINE_VERSION}-2.2.0.3
 
-FROM --platform=${BUILDPLATFORM} alpine:${ALPINE_VERSION} AS src
-RUN apk --update --no-cache add curl git tar tree xz
-WORKDIR /src
+# Tuned for the deployment host: AMD EPYC 7702P (Zen 2)
+ARG TARGET_ARCH_FLAGS="-march=znver2 -mtune=znver2"
 
-FROM src AS src-libsig
-ARG LIBSIG_VERSION
-RUN curl -sSL "https://download.gnome.org/sources/libsigc%2B%2B/3.0/libsigc%2B%2B-${LIBSIG_VERSION}.tar.xz" | tar xJv --strip 1
+FROM tianon/gosu:latest AS gosu
+
+FROM --platform=${BUILDPLATFORM} alpine:${ALPINE_VERSION} AS src
+RUN apk --update --no-cache add curl git tar tree sed xz
+WORKDIR /src
 
 FROM src AS src-cares
 ARG CARES_VERSION
 RUN curl -sSL "https://github.com/c-ares/c-ares/releases/download/v${CARES_VERSION}/c-ares-${CARES_VERSION}.tar.gz" | tar xz --strip 1
 
-FROM src AS src-xmlrpc
-RUN git init . && git remote add origin "https://github.com/crazy-max/xmlrpc-c.git"
-ARG XMLRPC_VERSION
-RUN git fetch origin "${XMLRPC_VERSION}" && git checkout -q FETCH_HEAD
-
 FROM src AS src-curl
 ARG CURL_VERSION
 RUN curl -sSL "https://curl.se/download/curl-${CURL_VERSION}.tar.gz" | tar xz --strip 1
 
+FROM src AS src-xmlrpc-c
+RUN git init . && git remote add origin "https://github.com/crazy-max/xmlrpc-c.git"
+ARG XMLRPC_C_VERSION
+RUN git fetch origin "${XMLRPC_C_VERSION}" && git checkout -q FETCH_HEAD
+
 FROM src AS src-libtorrent
-RUN wget "https://github.com/rakshasa/rtorrent/releases/download/v0.10.0/libtorrent-0.14.0.tar.gz"
-RUN tar -xvzf libtorrent-0.14.0.tar.gz
+RUN git init . && git remote add origin "https://github.com/rakshasa/libtorrent.git"
+ARG LIBTORRENT_VERSION
+RUN git fetch origin "${LIBTORRENT_VERSION}" && git checkout -q FETCH_HEAD
 
 FROM src AS src-rtorrent
-RUN wget "https://github.com/rakshasa/rtorrent/releases/download/v0.10.0/rtorrent-0.10.0.tar.gz"
-RUN tar -xvzf rtorrent-0.10.0.tar.gz
+RUN git init . && git remote add origin "https://github.com/rakshasa/rtorrent.git"
+ARG RTORRENT_VERSION
+RUN git fetch origin "${RTORRENT_VERSION}" && git checkout -q FETCH_HEAD
 
 FROM src AS src-mktorrent
 RUN git init . && git remote add origin "https://github.com/pobrn/mktorrent.git"
 ARG MKTORRENT_VERSION
 RUN git fetch origin "${MKTORRENT_VERSION}" && git checkout -q FETCH_HEAD
-
-FROM src AS src-geoip2-phpext
-RUN git init . && git remote add origin "https://github.com/rlerdorf/geoip.git"
-ARG GEOIP2_PHPEXT_VERSION
-RUN git fetch origin "${GEOIP2_PHPEXT_VERSION}" && git checkout -q FETCH_HEAD
 
 FROM src AS src-rutorrent
 RUN git init . && git remote add origin "https://github.com/Novik/ruTorrent.git"
@@ -62,15 +58,35 @@ ARG RUTORRENT_VERSION
 RUN git fetch origin "${RUTORRENT_VERSION}" && git checkout -q FETCH_HEAD
 RUN rm -rf .git* conf/users plugins/geoip share
 
+FROM composer:2 AS update-geoip2-rutorrent
+WORKDIR /app
+COPY geoip2-rutorrent/composer.json ./
+RUN composer update --no-dev --no-interaction --no-progress --prefer-dist --classmap-authoritative
+
+FROM scratch AS export-geoip2-rutorrent
+COPY --from=update-geoip2-rutorrent /app/composer.json /composer.json
+COPY --from=update-geoip2-rutorrent /app/composer.lock /composer.lock
+COPY --from=update-geoip2-rutorrent /app/vendor /vendor
+
+FROM composer:2 AS vendor-geoip2-rutorrent
+WORKDIR /app
+COPY geoip2-rutorrent/composer.json geoip2-rutorrent/composer.lock ./
+RUN composer install --no-dev --no-interaction --no-progress --prefer-dist --classmap-authoritative
+
 FROM src AS src-geoip2-rutorrent
-RUN git init . && git remote add origin "https://github.com/Micdu70/geoip2-rutorrent.git"
-ARG GEOIP2_RUTORRENT_VERSION
-RUN git fetch origin "${GEOIP2_RUTORRENT_VERSION}" && git checkout -q FETCH_HEAD
-RUN rm -rf .git*
+COPY geoip2-rutorrent /src
+COPY --from=vendor-geoip2-rutorrent /app/vendor /src/vendor
 
 FROM src AS src-mmdb
 RUN curl -SsOL "https://github.com/crazy-max/geoip-updater/raw/mmdb/GeoLite2-City.mmdb" \
   && curl -SsOL "https://github.com/crazy-max/geoip-updater/raw/mmdb/GeoLite2-Country.mmdb"
+
+FROM src AS src-dumptorrent
+RUN git init . && git remote add origin "https://github.com/tomcdj71/dumptorrent.git"
+ARG DUMPTORRENT_VERSION
+RUN git fetch origin "${DUMPTORRENT_VERSION}" && git checkout -q FETCH_HEAD
+RUN sed -i '1i #include <sys/time.h>' src/scrapec.c
+RUN rm -rf .git*
 
 FROM crazymax/alpine-s6:${ALPINE_S6_VERSION} AS builder
 RUN apk --update --no-cache add \
@@ -82,7 +98,8 @@ RUN apk --update --no-cache add \
     cppunit-dev \
     cmake \
     gd-dev \
-    geoip-dev \
+    libpsl-dev \
+    libsigc++3-dev \
     libtool \
     libxslt-dev \
     linux-headers \
@@ -90,27 +107,19 @@ RUN apk --update --no-cache add \
     nghttp2-dev \
     openssl-dev \
     pcre-dev \
-    php82-dev \
-    php82-pear \
+    php84-dev \
+    php84-pear \
     tar \
     tree \
-    udns-dev \
     xz \
     zlib-dev
 
+ARG TARGET_ARCH_FLAGS
 ENV DIST_PATH="/dist"
-
-WORKDIR /usr/local/src/libsig
-COPY --from=src-libsig /src .
-RUN ./configure
-RUN make -j$(nproc)
-RUN make install -j$(nproc)
-RUN make DESTDIR=${DIST_PATH} install -j$(nproc)
-RUN tree ${DIST_PATH}
 
 WORKDIR /usr/local/src/cares
 COPY --from=src-cares /src .
-RUN cmake . -D CARES_SHARED=ON -D CMAKE_BUILD_TYPE:STRING="Release" -D CMAKE_C_FLAGS_RELEASE:STRING="-O3 -flto=\"$(nproc)\" -pipe"
+RUN cmake . -D CARES_SHARED=ON -D CMAKE_BUILD_TYPE:STRING="Release" -D CMAKE_C_FLAGS_RELEASE:STRING="-O3 ${TARGET_ARCH_FLAGS} -flto=\"$(nproc)\" -pipe"
 RUN cmake --build . --clean-first --parallel $(nproc)
 RUN make install -j$(nproc)
 RUN make DESTDIR=${DIST_PATH} install -j$(nproc)
@@ -118,42 +127,42 @@ RUN tree ${DIST_PATH}
 
 WORKDIR /usr/local/src/curl
 COPY --from=src-curl /src .
-RUN cmake . -D ENABLE_ARES=ON CURL_LTO=ON -D CURL_USE_OPENSSL=ON -D CURL_BROTLI=ON -D CURL_ZSTD=ON -D BUILD_SHARED_LIBS=ON -D CMAKE_BUILD_TYPE:STRING="Release" -D CMAKE_C_FLAGS_RELEASE:STRING="-O3 -flto=\"$(nproc)\" -pipe"
+RUN cmake . -D ENABLE_ARES=ON -D CURL_LTO=ON -D CURL_USE_OPENSSL=ON -D CURL_BROTLI=ON -D CURL_ZSTD=ON -D BUILD_SHARED_LIBS=ON -D CMAKE_BUILD_TYPE:STRING="Release" -D CMAKE_C_FLAGS_RELEASE:STRING="-O3 ${TARGET_ARCH_FLAGS} -flto=\"$(nproc)\" -pipe"
 RUN cmake --build . --clean-first --parallel $(nproc)
 RUN make install -j$(nproc)
 RUN make DESTDIR=${DIST_PATH} install -j$(nproc)
 RUN tree ${DIST_PATH}
 
-WORKDIR /usr/local/src/xmlrpc
-COPY --from=src-xmlrpc /src .
-RUN ./configure --disable-wininet-client --disable-libwww-client --disable-cplusplus --disable-abyss-server --disable-cgi-server
-RUN make -j$(nproc) CFLAGS="-w -O3 -flto" CXXFLAGS="-w -O3 -flto"
+WORKDIR /usr/local/src/xmlrpc-c
+COPY --from=src-xmlrpc-c /src .
+RUN ./configure --disable-wininet-client --disable-libwww-client --disable-cplusplus --disable-abyss-server --disable-cgi-server CC="gcc -std=gnu17 ${TARGET_ARCH_FLAGS}" CXX="g++ -std=gnu++17 ${TARGET_ARCH_FLAGS}"
+RUN make -j$(nproc)
+RUN make install -j$(nproc)
+RUN make DESTDIR=${DIST_PATH} install -j$(nproc)
+RUN tree ${DIST_PATH}
+
+WORKDIR /usr/local/src/libtorrent
+COPY --from=src-libtorrent /src .
+RUN autoreconf -vfi
+RUN ./configure
+RUN make -j$(nproc) CXXFLAGS="-w -O3 ${TARGET_ARCH_FLAGS} -flto -Werror=odr -Werror=lto-type-mismatch -Werror=strict-aliasing"
 RUN make install -j$(nproc)
 RUN make DESTDIR=${DIST_PATH} install -j$(nproc)
 RUN tree ${DIST_PATH}
 
 WORKDIR /usr/local/src/rtorrent
-COPY --from=src-libtorrent /src/rtorrent/libtorrent .
-COPY --from=src-rtorrent /src/rtorrent/rtorrent .
-
-WORKDIR /usr/local/src/rtorrent/libtorrent
-RUN ./configure --enable-aligned --disable-instrumentation --enable-udns
-RUN make -j$(nproc) CXXFLAGS="-w -O3 -flto -Werror=odr -Werror=lto-type-mismatch -Werror=strict-aliasing"
-RUN make install -j$(nproc)
-RUN make DESTDIR=${DIST_PATH} install -j$(nproc)
-RUN tree ${DIST_PATH}
-
-WORKDIR /usr/local/src/rtorrent/rtorrent
+COPY --from=src-rtorrent /src .
+RUN autoreconf -vfi
 RUN ./configure --with-xmlrpc-c --with-ncurses
-RUN make -j$(nproc) CXXFLAGS="-w -O3 -flto -Werror=odr -Werror=lto-type-mismatch -Werror=strict-aliasing"
+RUN make -j$(nproc) CXXFLAGS="-w -O3 ${TARGET_ARCH_FLAGS} -flto -Werror=odr -Werror=lto-type-mismatch -Werror=strict-aliasing"
 RUN make install -j$(nproc)
 RUN make DESTDIR=${DIST_PATH} install -j$(nproc)
 RUN tree ${DIST_PATH}
 
 WORKDIR /usr/local/src/mktorrent
 COPY --from=src-mktorrent /src .
-RUN echo "CC = gcc" >> Makefile	
-RUN echo "CFLAGS = -w -flto -O3" >> Makefile
+RUN echo "CC = gcc" >> Makefile
+RUN echo "CFLAGS = -w -flto -O3 ${TARGET_ARCH_FLAGS}" >> Makefile
 RUN echo "USE_PTHREADS = 1" >> Makefile
 RUN echo "USE_OPENSSL = 1" >> Makefile
 RUN make -j$(nproc)
@@ -161,26 +170,21 @@ RUN make install -j$(nproc)
 RUN make DESTDIR=${DIST_PATH} install -j$(nproc)
 RUN tree ${DIST_PATH}
 
-WORKDIR /usr/local/src/geoip2-phpext
-COPY --from=src-geoip2-phpext /src .
-RUN <<EOT
-  set -e
-  phpize82
-  ./configure
-  make
-  make install
-EOT
-RUN mkdir -p ${DIST_PATH}/usr/lib/php82/modules
-RUN cp -f /usr/lib/php82/modules/geoip.so ${DIST_PATH}/usr/lib/php82/modules/
+WORKDIR /usr/local/src/dumptorrent
+COPY --from=src-dumptorrent /src .
+RUN cmake -B build/ -DCMAKE_CXX_COMPILER=g++ -DCMAKE_C_COMPILER=gcc -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS="${TARGET_ARCH_FLAGS}" -DCMAKE_CXX_FLAGS="${TARGET_ARCH_FLAGS}" -S .
+RUN cmake --build build/ --config Release --parallel $(nproc)
+RUN cp build/dumptorrent build/scrapec ${DIST_PATH}/usr/local/bin
 RUN tree ${DIST_PATH}
 
 FROM crazymax/alpine-s6:${ALPINE_S6_VERSION}
+COPY --from=gosu /gosu /usr/local/bin/
 COPY --from=builder /dist /
 COPY --from=src-rutorrent --chown=nobody:nogroup /src /var/www/rutorrent
 COPY --from=src-geoip2-rutorrent --chown=nobody:nogroup /src /var/www/rutorrent/plugins/geoip2
 COPY --from=src-mmdb /src /var/mmdb
 
-ENV PYTHONPATH="$PYTHONPATH:/var/www/rutorrent" \
+ENV PYTHONPATH="/var/www/rutorrent" \
   S6_BEHAVIOUR_IF_STAGE2_FAILS="2" \
   S6_KILL_GRACETIME="10000" \
   TZ="UTC" \
@@ -193,8 +197,10 @@ RUN echo "net.core.rmem_max = 67108864" >> /etc/sysctl.conf \
   && sysctl -p
 
 # unrar package is not available since alpine 3.15
+# dhclient package is not available since alpine 3.21
 RUN echo "@314 http://dl-cdn.alpinelinux.org/alpine/v3.14/main" >> /etc/apk/repositories \
-  && apk --update --no-cache add unrar@314
+  && echo "@320 http://dl-cdn.alpinelinux.org/alpine/v3.20/main" >> /etc/apk/repositories \
+  && apk --update --no-cache add unrar@314 dhclient@320
 
 RUN apk --update --no-cache add \
     apache2-utils \
@@ -204,13 +210,11 @@ RUN apk --update --no-cache add \
     brotli \
     ca-certificates \
     coreutils \
-    cppunit-dev \
-    dhclient \
     ffmpeg \
     findutils \
-    geoip \
     grep \
     gzip \
+    libsigc++3 \
     libstdc++ \
     mediainfo \
     ncurses \
@@ -218,28 +222,27 @@ RUN apk --update --no-cache add \
     nginx-mod-http-dav-ext \
     nginx-mod-http-geoip2 \
     openssl \
-    php82 \
-    php82-bcmath \
-    php82-ctype \
-    php82-curl \
-    php82-dom \
-    php82-fileinfo \
-    php82-fpm \
-    php82-mbstring \
-    php82-openssl \
-    php82-phar \
-    php82-posix \
-    php82-session \
-    php82-sockets \
-    php82-xml \
-    php82-zip \
+    php84 \
+    php84-bcmath \
+    php84-ctype \
+    php84-curl \
+    php84-dom \
+    php84-fileinfo \
+    php84-fpm \
+    php84-mbstring \
+    php84-openssl \
+    php84-posix \
+    php84-session \
+    php84-simplexml \
+    php84-sockets \
+    php84-xml \
+    php84-zip \
     python3 \
     py3-pip \
     shadow \
     sox \
     tar \
     tzdata \
-    udns \
     unzip \
     util-linux \
     zip \
